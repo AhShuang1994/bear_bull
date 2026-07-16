@@ -1,0 +1,16 @@
+# 私密配置：Telegram bot token / chat id（模板见 telegram_config.example.py）
+telegram_config.py
+
+# 运行产物
+charts/
+__pycache__/
+*.pyc
+*.log
+scan_push_err.txt
+scan_push_log.txt
+
+# 调试/临时数据
+debug_ohlcv*.json
+temp_results*.json
+multi_leg_matches.json
+c1c2_bear_matches.json
