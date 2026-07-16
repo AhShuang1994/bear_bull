@@ -327,4 +327,6 @@ C3 的触发从 C2 确认点之后找（"3连消耗"案例）。
 6. 2026-07-16 规则改动后 LIT/UAI/HIGH 出现的结构变化（LIT 多 Base 2、UAI Base1 被
    -18.3% 深回调取代成两腿、HIGH 多早期 Base 1）用户还没逐个对 TradingView 验收；
 7. `plot_c1c2_bear_exp.py` 落后主程序多轮，删不删用户没说。
-8. ⚠️ Telegram bot token 明文写在两个扫描器里，仓库别外传。
+8. Telegram token 已外置到 `telegram_config.py`（.gitignore 排除，模板见
+   `telegram_config.example.py`）。仓库：https://github.com/AhShuang1994/bear_bull
+   （2026-07-16 首推）。换机器部署要手动补 telegram_config.py。
