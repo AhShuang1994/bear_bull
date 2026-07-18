@@ -173,18 +173,22 @@ def main():
             is_new_listing = len(ohlcv_1d) < 200
             if not is_new_listing and not is_ma150_falling(ohlcv_1d):
                 continue
-            ohlcv = mod.fetch_ohlcv_paginated(sym, mod.TIMEFRAME, mod.LIMIT)
-            if len(ohlcv) < 300:
-                continue
+            # 轻量预检（2026-07-18 提速，判定语义不变）：流动性只看最近50根、排列只看
+            # 最近200根收盘价，先拉210根把这两关做完，过关才分页拉全量2000根给结构检测——
+            # 没过关的币省掉大头的分页请求
+            ohlcv_lite = exchange.fetch_ohlcv(sym, mod.TIMEFRAME, limit=210)
             # 流动性关卡：最近50根平均量（=TV的Volume MA50）× 现价 × 每天根数（1H就是x24）>= 1M USDT
-            avg_vol = sum(c[5] for c in ohlcv[-VOL_MA_LEN:]) / VOL_MA_LEN
-            if avg_vol * ohlcv[-1][4] * candles_per_day < MIN_DAILY_USDT:
+            avg_vol = sum(c[5] for c in ohlcv_lite[-VOL_MA_LEN:]) / VOL_MA_LEN
+            if avg_vol * ohlcv_lite[-1][4] * candles_per_day < MIN_DAILY_USDT:
                 continue
-            closes = [c[4] for c in ohlcv]
+            closes = [c[4] for c in ohlcv_lite]
             m50 = mod.get_sma(closes, 50)
             m150 = mod.get_sma(closes, 150)
             m200 = mod.get_sma(closes, 200)
             if not (m200 and m150 and m50 and m200 > m150 > m50):
+                continue
+            ohlcv = mod.fetch_ohlcv_paginated(sym, mod.TIMEFRAME, mod.LIMIT)
+            if len(ohlcv) < 300:
                 continue
         except ccxt.RateLimitExceeded:
             print(f"  [{sym}] 限流，等30秒继续")
