@@ -115,65 +115,42 @@ def find_leg_low(ohlcv, highs, lows, ma50_series, ma150_series, ma200_series, n,
 
 def find_bases_bull(ohlcv):
     """
-    多头 VCP 滚动 Base 检测（空头版 find_bases 的镜像）：
-    - Reset = 最近一次"MA150死叉MA200后重新回到多头排列 (MA50>MA150>MA200)"
-    - C1 资格：高点之后的回调必须 碰到MA50（多头排列中MA50是最上面的支撑线）
-      且出现连续3根阴线/长影线确认（顺序不限）；高点出现新高就后移、条件重数
-    - C = 高点 -> 高点之后的回调低点；高点必须出现在"连续3根确认"开始之前
-    - 取代：候选低点 <= 参考低点（回调更深，前一个C没走完）或 % >= 参考% -> 原地取代；级联取代
-    - 突破：任何一根K线的 high 升破 C1 高点 = 突破完成封 Base（至少要有C2）
-    - 超过6个C不作废：照样封Base但标weak（2026-07-16，镜像空头）；封口后从突破K线继续找下一组 -> Base 2, 3...
-    - 只用已收盘K线：进场先丢掉最后一根（未走完的当前小时），图上照画但不参与判定
+    多头 VCP 滚动 Base 检测（v4 逻辑，2026-07-21 由 c1c2_v4.py 合并进主引擎，空头镜像）：
+    - 统一确认：C1~C6 都用 find_c —— 从段起点逐根跟踪最高点(锚点)，从锚点数streak
+      (锚点当根合格即算第一根)，连续3根确认；C1 额外保留 MA50 关(require_ma50)。
+    - 段起点统一 = 上一个C的 box_end+1（不再区分低点+1/同根C例外/主动创新高）。
+    - Reset / 升破C1高点封口 / >6C标弱 / 已收盘纪律(ohlcv[:-1]) 同前。
     """
-    # 结构检测只用已收盘K线（2026-07-18，NOTES §8.0，用户已确认）：ohlcv[-1] 是未走完的
-    # 当前小时，会造成"当时合格、收盘后蒸发"的假确认（CYS 假C2 案例，镜像空头引擎同一改动）
     ohlcv = ohlcv[:-1]
     n = len(ohlcv)
     if n < 210:
         return None
-
-    closes = [c[4] for c in ohlcv]
-    highs  = [c[2] for c in ohlcv]
-    lows   = [c[3] for c in ohlcv]
-
-    ma50_series  = calc_sma_series(closes, 50)
+    closes = [c[4] for c in ohlcv]; highs = [c[2] for c in ohlcv]; lows = [c[3] for c in ohlcv]
+    ma50_series = calc_sma_series(closes, 50)
     ma150_series = calc_sma_series(closes, 150)
     ma200_series = calc_sma_series(closes, 200)
-
-    # Reset 取【最近一次】"死叉后重新回到多头排列"
-    reset_end_idx = None
-    last_cross_idx = None
-    cross_used = False
+    reset_end_idx = None; last_cross_idx = None; cross_used = False
     for i in range(200, n):
         m150_p, m200_p = ma150_series[i-1], ma200_series[i-1]
         m150_i, m200_i = ma150_series[i], ma200_series[i]
         if all([m150_p, m200_p, m150_i, m200_i]) and m150_p >= m200_p and m150_i < m200_i:
-            last_cross_idx = i
-            cross_used = False
+            last_cross_idx = i; cross_used = False
         ma50 = ma50_series[i]
         if not all([ma50, m150_i, m200_i]):
             continue
         if last_cross_idx is not None and not cross_used and ma50 > m150_i > m200_i:
-            reset_end_idx = i
-            cross_used = True
-
+            reset_end_idx = i; cross_used = True
     if reset_end_idx is None:
         return None
 
-    def find_c1(start):
-        high_idx = None
-        high_over_ma50 = False
-        failed_high = None   # 已判定"回调段碰不到MA50"的高点，不再重复检查
-        streak = 0
-        confirmed = False
+    def find_c(start, require_ma50):
+        high_idx = None; high_over = False; failed = None; streak = 0; confirmed = False
         for i in range(start, n):
             if high_idx is None or highs[i] > highs[high_idx]:
-                high_idx = i   # 新高出现，高点后移，两个条件全部重新数
-                # C1高点必须在MA50上方：价格从均线上面回落碰它才叫"碰到MA50"
-                # （镜像2026-07-10定稿：价格压在MA50下方时touch条件形同虚设）
-                m50_at_high = ma50_series[i]
-                high_over_ma50 = m50_at_high is not None and ohlcv[i][4] > m50_at_high
-                streak = 0
+                high_idx = i
+                m = ma50_series[i]
+                high_over = m is not None and ohlcv[i][4] > m
+                streak = 1 if is_c_candle_bull(ohlcv[i]) else 0
                 confirmed = False
                 continue
             if is_c_candle_bull(ohlcv[i]):
@@ -182,148 +159,78 @@ def find_bases_bull(ohlcv):
                     confirmed = True
             else:
                 streak = 0
-            if not (confirmed and high_over_ma50) or high_idx == failed_high:
+            ready = confirmed and (high_over if require_ma50 else True)
+            if not ready or high_idx == failed:
                 continue
             leg = find_leg_low(ohlcv, highs, lows, ma50_series, ma150_series, ma200_series, n,
                                high_idx, highs[high_idx])
             if leg is None:
-                failed_high = high_idx
-                continue
+                failed = high_idx; continue
             low, low_idx, region_end = leg
             if i > region_end:
-                failed_high = high_idx
-                continue
-            # 触碰MA50必须发生在C1【自己的回调段】内（高点~低点之间）——镜像HIGH案例
-            touched = any(
-                ma50_series[j] is not None and lows[j] <= ma50_series[j]
-                for j in range(high_idx, low_idx + 1))
-            if not touched:
-                failed_high = high_idx
-                continue
-            return {
-                "high": highs[high_idx], "high_idx": high_idx,
-                "low": low, "low_idx": low_idx,
-                "pullback": (highs[high_idx] - low) / highs[high_idx] if highs[high_idx] else 0,
-                "region_end": region_end,
-                "box_end_idx": max(low_idx, i),
-            }
+                failed = high_idx; continue
+            if require_ma50:
+                touched = any(ma50_series[j] is not None and lows[j] <= ma50_series[j]
+                              for j in range(high_idx, low_idx + 1))
+                if not touched:
+                    failed = high_idx; continue
+            return {"high": highs[high_idx], "high_idx": high_idx, "low": low, "low_idx": low_idx,
+                    "contraction": (highs[high_idx] - low) / highs[high_idx] if highs[high_idx] else 0,
+                    "box_end_idx": max(low_idx, i), "confirm_at": i}
         return None
 
-    bases = []
-    open_chain = None
-    search_start = reset_end_idx
-
+    bases = []; open_chain = None; search_start = reset_end_idx
     while search_start < n - 5:
-        c1 = find_c1(search_start)
-        if c1 is None:
+        raw = find_c(search_start, True)
+        if raw is None:
             break
-        chain = [c1]
-        c1_high = c1['high']
-        outcome = None  # ('sealed', idx) / 'open'
-        # 触发搜索游标：C1的确认组3连已被C1消耗，C2从C1的框结束之后找新的3连
-        scan_from = c1['box_end_idx'] + 1
-
+        c1 = {"high": raw["high"], "high_idx": raw["high_idx"], "low": raw["low"],
+              "low_idx": raw["low_idx"], "pullback": raw["contraction"], "box_end_idx": raw["box_end_idx"]}
+        chain = [c1]; c1_high = c1['high']; outcome = None; guard = 0
         while True:
+            guard += 1
+            if guard > n:
+                outcome = 'open'; break
             ref = chain[-1]
-            # 段的起点固定在前一个C的低点+1；scan_from 只推进确认触发的搜索位置
-            start_idx = ref['low_idx'] + 1
-            trigger_from = max(start_idx, scan_from)
-            if trigger_from >= n:
-                outcome = 'open'
-                break
-
-            # 突破检查：start_idx 起第一根 high 升破 C1 高点的K线
+            seg_start = ref['box_end_idx'] + 1
+            if seg_start >= n:
+                outcome = 'open'; break
             breakout_idx = None
-            for i in range(start_idx, n):
+            for i in range(seg_start, n):
                 if highs[i] > c1_high:
-                    breakout_idx = i
-                    break
-
-            c_idx = find_c_pattern_bull(ohlcv[trigger_from:])
-            confirm_idx = trigger_from + c_idx if c_idx is not None else None
-
-            if breakout_idx is not None and (confirm_idx is None or breakout_idx <= confirm_idx):
-                outcome = ('sealed', breakout_idx)
-                break
-            if confirm_idx is None:
-                outcome = 'open'
-                break
-
-            segment = ohlcv[start_idx:confirm_idx + 1]
-            cand_high_rel = max(range(len(segment)), key=lambda i: segment[i][2])
-            cand_high     = segment[cand_high_rel][2]
-            cand_high_idx = start_idx + cand_high_rel
-
-            # 高点不能落在3连的第二/三根（确认蜡烛上影线冒充高点——镜像H假C3案例）；
-            # 可以是3连的【第一根】（冲出新高的长上影反转蜡烛自己开启3连——镜像SIREN Base3 1928案例）
-            if cand_high_idx > confirm_idx - 2:
-                scan_from = confirm_idx + 1
-                continue
-            # 候选高点那根必须【主动创新高】（high高于它前一根的high）：新回调的开始一定是冲出
-            # 新高的那根（镜像SLX 885案例）；没创新高的"段内最高"只是段边界上的巧合，
-            # 不开启C（镜像SIREN C7案例，2026-07-16定稿）
-            if cand_high_idx > 0 and cand_high <= highs[cand_high_idx - 1]:
-                scan_from = confirm_idx + 1
-                continue
-
-            leg = find_leg_low(ohlcv, highs, lows, ma50_series, ma150_series, ma200_series, n,
-                               cand_high_idx, cand_high)
-            if leg is None:
-                # 高点之后没有真实的回调（下一根就升破高点了）——不构成C，确认作废跳过
-                scan_from = confirm_idx + 1
-                continue
-            cand_low, cand_low_idx, _ = leg
-            cand_end_idx = max(confirm_idx, cand_low_idx)
-
-            cand_pct = (cand_high - cand_low) / cand_high if cand_high else 0
-            ref_pct = ref.get('contraction', ref.get('pullback'))
-
-            # 跌破参考低点（回调更深，前一个C没走完）、或 % 没收缩 -> 取代前一个C
+                    breakout_idx = i; break
+            cand = find_c(seg_start, False)
+            confirm_at = cand['confirm_at'] if cand else None
+            if breakout_idx is not None and (confirm_at is None or breakout_idx <= confirm_at):
+                outcome = ('sealed', breakout_idx); break
+            if cand is None:
+                outcome = 'open'; break
+            cand_high = cand['high']; cand_high_idx = cand['high_idx']
+            cand_low = cand['low']; cand_low_idx = cand['low_idx']; cand_end = cand['box_end_idx']
+            cand_pct = cand['contraction']; ref_pct = ref.get('contraction', ref.get('pullback'))
             if cand_low <= ref['low'] or (ref_pct is not None and cand_pct >= ref_pct):
-                ref['low'] = cand_low
-                ref['low_idx'] = cand_low_idx
+                ref['low'] = cand_low; ref['low_idx'] = cand_low_idx
                 if 'pullback' in ref:
                     ref['pullback'] = (ref['high'] - cand_low) / ref['high'] if ref['high'] else 0
-                    ref['confirm_idx'] = cand_end_idx
-                    ref['box_end_idx'] = max(ref.get('box_end_idx', 0), cand_end_idx)
+                    ref['box_end_idx'] = max(ref.get('box_end_idx', 0), cand_end)
                 else:
-                    ref['high'] = cand_high
-                    ref['high_idx'] = cand_high_idx
-                    ref['contraction'] = cand_pct
-                    ref['box_end_idx'] = cand_end_idx
-                    # 级联取代：被撑大的C如果%反超了它前一个C，就把前一个吞掉（C1不被吞）
+                    ref['high'] = cand_high; ref['high_idx'] = cand_high_idx
+                    ref['contraction'] = cand_pct; ref['box_end_idx'] = cand_end
                     while len(chain) >= 3 and (chain[-1].get('contraction', 0)
                                                >= chain[-2].get('contraction', chain[-2].get('pullback', 0))):
                         del chain[-2]
-                scan_from = confirm_idx + 1  # 这组3连已被取代动作消耗，下一个触发要找新的3连
                 continue
-
-            chain.append({
-                "high": cand_high, "high_idx": cand_high_idx,
-                "search_start_idx": start_idx,
-                "low": cand_low, "low_idx": cand_low_idx,
-                "box_end_idx": cand_end_idx,
-                "contraction": cand_pct,
-            })
-            scan_from = confirm_idx + 1  # 一组3连确认只能用一次：被本C消耗后，下一个C从确认点之后找新3连
-
-            # 超过6个C不作废：结构继续跟踪到突破封口照样成Base，只是标记"强度不强"（2026-07-16定稿）
-
+            chain.append({"high": cand_high, "high_idx": cand_high_idx, "low": cand_low,
+                          "low_idx": cand_low_idx, "box_end_idx": cand_end, "contraction": cand_pct})
         if outcome == 'open':
-            open_chain = chain
-            break
-
+            open_chain = chain; break
         _, idx = outcome
         if len(chain) >= 2:
-            bases.append({"num": len(bases) + 1, "legs": chain, "breakout_idx": idx,
-                          "weak": len(chain) > 6})  # >6个C：Base成立但强度不强
+            bases.append({"num": len(bases) + 1, "legs": chain, "breakout_idx": idx, "weak": len(chain) > 6})
         search_start = idx
-
     if not bases and not open_chain:
         return None
-
     return {"reset_idx": reset_end_idx, "bases": bases, "open": open_chain}
-
 # ============ 画图 ============
 
 def plot_candlestick(ax, ohlcv, start_idx=0):
